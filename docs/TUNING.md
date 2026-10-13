@@ -75,7 +75,9 @@ desktop card runs into two walls.
 **Wall 1: one large allocation fails.** With 6.6–6.8 GB reported free, any single `cudaMalloc` above about
 5.4 GB fails (5.4, 5.6, 5.8 and 6.0 GB all tried). `-sm row` is not supported on one device, and
 `-sm tensor` still makes one allocation. `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` (managed memory) gets past this,
-with no measurable cost when the model fits (12.53 vs 12.54 tok/s at the same placement).
+An earlier claimed overhead comparison (12.53 vs 12.54 tok/s) is invalid: setting
+`GGML_CUDA_ENABLE_UNIFIED_MEMORY=0` still enables it in b11576, which checks only
+whether the variable exists. To disable managed memory, unset the variable entirely.
 
 **Wall 2: the real budget is ~6.1 GB.** Everything llama.cpp allocates has to fit in about 6.1 GB, the same
 total the stable quality profile uses. UD-IQ1_M's GPU-resident weights alone are 6.0 GB, so under managed

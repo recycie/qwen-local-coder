@@ -1,0 +1,72 @@
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index f06b94d15..d13b0f5a7 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include "llama-graph.h"
+ 
+ #include "llama-impl.h"
+@@ -2899,6 +2900,18 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+ 
+         cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
+                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
++        // Experimental host KV streaming: force attention onto its layer's GPU.
++        // The scheduler copies host K/V inputs; this is not asynchronous prefetch.
++        const char * force_gpu = std::getenv("QLC_KV_ATTN_GPU");
++        if (force_gpu && std::string(force_gpu) == "1") {
++            for (int bi = 0; bi < ggml_backend_sched_get_n_backends(sched); ++bi) {
++                ggml_backend_t backend = ggml_backend_sched_get_backend(sched, bi);
++                if (ggml_backend_dev_type(ggml_backend_get_device(backend)) == GGML_BACKEND_DEVICE_TYPE_GPU) {
++                    ggml_backend_sched_set_tensor_backend(sched, cur, backend);
++                    break;
++                }
++            }
++        }
+         res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, cur, il});
+ 
+         ggml_flash_attn_ext_add_sinks(cur, sinks);
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index 463510caa..956186e74 100644
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -9,6 +9,7 @@
+ #include <cassert>
+ #include <cmath>
+ #include <cstring>
++#include <cstdlib>
+ #include <limits>
+ #include <map>
+ #include <stdexcept>
+@@ -160,6 +161,13 @@ llama_kv_cache::llama_kv_cache(
+                 __func__, hparams.n_embd_v_gqa_max());
+     }
+ 
++    // Experimental: only attention KV placement changes; recurrent state is untouched.
++    const char * host_n_env = std::getenv("QLC_HOST_KV_LAYERS");
++    const int host_n = host_n_env ? std::stoi(host_n_env) : 0;
++    if (host_n < 0 || host_n > (int) n_layer) {
++        throw std::runtime_error("QLC_HOST_KV_LAYERS out of range");
++    }
++    int attn_ordinal = 0;
+     const bool is_mla = hparams.is_mla();
+ 
+     for (uint32_t il = 0; il < n_layer; il++) {
+@@ -213,14 +221,15 @@ llama_kv_cache::llama_kv_cache(
+ 
+         ggml_backend_buffer_type_t buft = ggml_backend_cpu_buffer_type();
+ 
+-        if (offload) {
++        const bool host_kv = attn_ordinal++ < host_n;
++        if (offload && !host_kv) {
+             auto * dev = model.dev_layer(il);
+             buft = ggml_backend_dev_buffer_type(dev);
+ 
+             dev_name = ggml_backend_dev_name(dev);
+         }
+ 
+-        LLAMA_LOG_DEBUG("%s: layer %3d: dev = %s\n", __func__, il, dev_name);
++        LLAMA_LOG_INFO("%s: layer %3d: KV dev = %s (host override %d)\n", __func__, il, dev_name, host_kv);
+ 
+         ggml_context * ctx = ctx_for_buft(buft);
+         if (!ctx) {
