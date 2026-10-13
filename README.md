@@ -4,7 +4,7 @@ Run **Qwen3.8-27B** (the strongest open coding model in the 20–40B class as of
 OpenAI-compatible backend for coding agents, on a **consumer 8 GB GPU**.
 
 It is a single, dependency-light CLI (`qlc`) around a pinned [llama.cpp](https://github.com/ggml-org/llama.cpp)
-build, with checksum-verified downloads, a tuned tensor placement for small GPUs, MTP speculative decoding,
+build, with checksum-verified downloads, measured hardware profiles, speculative decoding,
 safe defaults and a systemd user service.
 
 ```
@@ -26,29 +26,32 @@ Vendor-reported numbers from the [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3
 [Muse Glimmer-30B](https://huggingface.co/meta-models/Muse-Glimmer-30B) and
 [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) model cards. ¹Terminal-Bench 2.0.
 
-The weights are the [ISTA-DASLab GSQ-RCO](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF)
-non-uniform quantization, which keeps far more quality at 2.5 bits than standard quants
-(LiveCodeBench v6 76.6 vs 72.0 for UD-IQ2_S at the same 8.4 GB), and ships the model's
-Multi-Token-Prediction head for speculative decoding.
+## Profiles and measured performance
 
-## Measured performance
+RTX 5060 8 GB (desktop session) · i7-12700F · 32 GB RAM · llama.cpp b11576.
+HumanEval-20 = 20 evenly spaced HumanEval problems, greedy, thinking off, tests run in an offline sandbox.
 
-RTX 5060 8 GB · i7-12700F · 32 GB RAM · llama.cpp b11576 · profile `rtx5060-8gb`
+| | `rtx5060-8gb-quality` (default) | `rtx5060-8gb-fast` |
+|---|---|---|
+| Weights | [GSQ-RCO](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF) IQ2_XS, 2.5 bpw, with MTP head | [Unsloth](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) UD-IQ1_M, 1.75 bpw |
+| Placement | GPU + FFN of 60/64 layers in RAM | whole model on GPU (CUDA managed memory) |
+| Speculation | MTP, 77–96 % accepted | ngram, ~99 % accepted on edits |
+| Writing new code | ~5 tok/s | **~32 tok/s** |
+| Rewriting / editing code | ~5 tok/s | **~110 tok/s** |
+| Prompt processing | ~60–80 tok/s | **~600–680 tok/s** |
+| Context | 32K | **4K max** |
+| HumanEval-20 | **19/20** | 15/20 |
+| Use for | coding agents, anything needing context | quick questions, single-file edits, completions |
 
-| | |
-|---|---|
-| Generation | **~5 tok/s** (4.3–5.4 depending on content) |
-| Prompt processing | ~60–80 tok/s |
-| MTP draft acceptance | 77–96 % |
-| Context | 32K tokens |
-| VRAM / RAM | ~5.8 GB (6.8 GB incl. desktop) / ~6 GB mapped |
+**Read before choosing `fast`:** it gets its speed by keeping a 6 GB model on a card with ~6.1 GB usable
+under a desktop, which only works through managed-memory oversubscription. Past ~5K tokens of context the
+KV cache evicts weights and generation collapses to 0.4–5 tok/s, so the profile caps context at 4K. That is
+too small for coding agents, whose system prompts alone usually exceed it. The 1.75-bit weights also cost
+real accuracy, and thinking mode does not recover it (14/20 with thinking).
 
-That is about 4× faster than a naive `--fit` / `-ngl` setup (1.2–2.8 tok/s) on the same machine.
-On this box the ceiling is system-RAM bandwidth (~17 GB/s measured), not the GPU; see
-[docs/TUNING.md](docs/TUNING.md) for the full investigation and what would make it faster.
-
-**Be realistic:** ~5 tok/s is fine for focused tasks and reviews, slow for long autonomous agent loops.
-If you need speed over quality on 8 GB, a 3B-active MoE such as Qwen3.6-35B-A3B runs at ~20 tok/s.
+`quality` is the default because it is the one that holds up in agent use. On this box it is limited by
+system-RAM bandwidth (~17 GB/s measured), not by the GPU. A 16 GB card would let 2.5–3.5-bit weights
+live entirely in VRAM; see [docs/TUNING.md](docs/TUNING.md) for every measurement and what would help.
 
 ## Requirements
 
@@ -67,6 +70,13 @@ qlc doctor        # check GPU / RAM / disk
 qlc install       # pinned llama.cpp + 8.4 GB model, sha256-verified, resumable
 qlc start
 qlc bench
+```
+
+Switch profile for one run, or permanently:
+
+```bash
+QLC_PROFILE=rtx5060-8gb-fast qlc install && QLC_PROFILE=rtx5060-8gb-fast qlc start
+echo 'QLC_PROFILE=rtx5060-8gb-fast' >> ~/.config/qwen-local-coder/config.env
 ```
 
 Already have the GGUF? Point `QLC_MODELS_DIR` at its directory (it is still verified):
@@ -119,8 +129,9 @@ The settings that matter most:
 |---|---|---|
 | `QLC_CPU_FFN` | 60 | FFN weights of the first N of 64 layers stay in system RAM; everything else is on the GPU. Lower = faster, needs more VRAM. Use `qlc tune`. |
 | `QLC_CTX` | 32768 | Context length. Only 16 of 64 layers use full attention, so KV is cheap (~1.1 GB at 32K q8). |
-| `QLC_MODEL` | IQ2_XS | `IQ2_XS` 8.4 GB, `IQ2_S` 9.3 GB, `IQ3_XXS` 10.1 GB, `IQ3_S` 11.8 GB (higher = better quality, slower here) |
-| `QLC_SPEC_TYPE` | draft-mtp | MTP speculative decoding; `none` to disable |
+| `QLC_MODEL` | IQ2_XS | GSQ-RCO with MTP: `IQ2_XS` 8.4 GB, `IQ2_S` 9.3 GB, `IQ3_XXS` 10.1 GB, `IQ3_S` 11.8 GB. Unsloth, no MTP: `UD-IQ1_M` 6.3 GB, `UD-IQ2_XXS` 6.8 GB |
+| `QLC_SPEC_TYPE` | draft-mtp | `draft-mtp` (needs an MTP model), `ngram-mod` (drafts by copying from the prompt; large win on edits when the model is fully on the GPU), `none` |
+| `QLC_UNIFIED_MEMORY` | 0 | CUDA managed memory: lets a model bigger than the largest free contiguous VRAM block load, at the risk of collapse once VRAM is oversubscribed |
 | `QLC_THREADS` | 6 | CPU threads; more than the P-core count does not help (bandwidth bound) |
 
 ## Running as a service

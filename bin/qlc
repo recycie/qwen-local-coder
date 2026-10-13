@@ -53,7 +53,10 @@ build_cmd() {
   llama=$(llama_dir)
   model=$(model_path)
   SERVER_BIN="$llama/llama-server"
-  SERVER_LIB="$llama"
+  SERVER_ENV=("LD_LIBRARY_PATH=$llama${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
+  # Managed allocations sidestep the largest-contiguous-block limit that a desktop
+  # session imposes on 8GB cards (a single >~5GB cudaMalloc fails with 6.6GB free).
+  ((QLC_UNIFIED_MEMORY)) && SERVER_ENV+=(GGML_CUDA_ENABLE_UNIFIED_MEMORY=1)
   SERVER_CMD=(
     "$SERVER_BIN"
     --model "$model"
@@ -80,8 +83,9 @@ build_cmd() {
     SERVER_CMD+=(--override-tensor "blk\\.(${layers})\\.ffn_(up|down|gate)\\.weight=CPU")
   fi
   if [[ "$QLC_SPEC_TYPE" != none ]]; then
+    SERVER_CMD+=(--spec-type "$QLC_SPEC_TYPE")
     # NB: do not quantize the draft KV cache (-ctkd/-ctvd); it OOM-crashes at runtime.
-    SERVER_CMD+=(--spec-type "$QLC_SPEC_TYPE" --spec-draft-n-max "$QLC_SPEC_N_MAX")
+    [[ "$QLC_SPEC_TYPE" == *draft-mtp* ]] && SERVER_CMD+=(--spec-draft-n-max "$QLC_SPEC_N_MAX")
   fi
   [[ -n "$QLC_API_KEY_FILE" ]] && SERVER_CMD+=(--api-key-file "$QLC_API_KEY_FILE")
   if [[ -n "$QLC_EXTRA_ARGS" ]]; then
@@ -93,8 +97,9 @@ build_cmd() {
 
 cmd_print_cmd() {
   build_cmd
-  printf 'LD_LIBRARY_PATH=%q' "$SERVER_LIB"
-  printf ' %q' "${SERVER_CMD[@]}"
+  printf '%q ' "${SERVER_ENV[@]}"
+  printf '%q' "${SERVER_CMD[0]}"
+  printf ' %q' "${SERVER_CMD[@]:1}"
   printf '\n'
 }
 
@@ -206,14 +211,13 @@ cmd_start() {
     log "starting in foreground on $(base_url)/v1"
     printf '%s\n' "$$" >"$(pid_file)"
     exec 9>&-
-    LD_LIBRARY_PATH="$SERVER_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec "${SERVER_CMD[@]}"
+    exec env "${SERVER_ENV[@]}" "${SERVER_CMD[@]}"
   fi
   local lf
   lf=$(log_file)
   rotate_log "$lf"
   printf '\n===== qlc %s start %s =====\n' "$QLC_VERSION" "$(date -Is)" >>"$lf"
-  LD_LIBRARY_PATH="$SERVER_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-    setsid "${SERVER_CMD[@]}" >>"$lf" 2>&1 </dev/null 9>&- &
+  env "${SERVER_ENV[@]}" setsid "${SERVER_CMD[@]}" >>"$lf" 2>&1 </dev/null 9>&- &
   pid=$!
   printf '%s\n' "$pid" >"$(pid_file)"
   log "started pid $pid, loading model (log: $lf)"
@@ -272,8 +276,8 @@ cmd_status() {
   esac
   printf 'endpoint: %s/v1  (model: %s)\n' "$(base_url)" "$QLC_ALIAS"
   printf 'model   : %s\n' "$(model_path)"
-  printf 'layout  : ctx=%s cpu_ffn=%s kv=%s spec=%s(n=%s)\n' \
-    "$QLC_CTX" "$QLC_CPU_FFN" "$QLC_KV_TYPE" "$QLC_SPEC_TYPE" "$QLC_SPEC_N_MAX"
+  printf 'layout  : profile=%s model=%s ctx=%s cpu_ffn=%s kv=%s spec=%s unified_mem=%s\n' \
+    "$QLC_PROFILE" "$QLC_MODEL" "$QLC_CTX" "$QLC_CPU_FFN" "$QLC_KV_TYPE" "$QLC_SPEC_TYPE" "$QLC_UNIFIED_MEMORY"
   if command -v nvidia-smi >/dev/null 2>&1; then
     printf 'gpu     : %s\n' "$(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader | head -1)"
   fi

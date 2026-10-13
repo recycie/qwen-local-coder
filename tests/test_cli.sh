@@ -23,9 +23,19 @@ out=$("$QLC" --help)
 expect_contains "help lists commands" "$out" "service install"
 
 out=$("$QLC" print-cmd)
+expect_contains "quality profile is default" "$out" "Qwen3.8-27B-GSQ-RCO-IQ2_XS-mtp.gguf"
+out=$(QLC_PROFILE=rtx5060-8gb-fast "$QLC" print-cmd)
+expect_contains "fast: short context" "$out" "--ctx-size 4096"
+expect_contains "fast: unified memory" "$out" "GGML_CUDA_ENABLE_UNIFIED_MEMORY=1"
+expect_contains "fast: ngram speculation" "$out" "--spec-type ngram-mod"
+[[ "$out" != *"override-tensor"* && "$out" != *"spec-draft-n-max"* ]] && ok "fast: whole model on GPU, no MTP flags" || bad "fast: whole model on GPU, no MTP flags"
+
+export QLC_PROFILE=rtx5060-8gb-quality
+out=$("$QLC" print-cmd)
+[[ "$out" != *"UNIFIED_MEMORY"* ]] && ok "quality: no unified memory" || bad "quality: no unified memory"
 expect_contains "default port" "$out" "--port 8089"
 expect_contains "default ctx" "$out" "--ctx-size 32768"
-expect_contains "mtp speculation" "$out" "--spec-type draft-mtp"
+expect_contains "mtp speculation" "$out" "--spec-type draft-mtp --spec-draft-n-max 3"
 expect_contains "ffn override covers layer 59" "$out" "\|58\|59\)"
 [[ "$out" != *"\|60\|"* ]] && ok "ffn override stops at 59" || bad "ffn override stops at 59"
 [[ "$out" != *"-ctkd"* ]] && ok "draft KV not quantized" || bad "draft KV not quantized"
@@ -73,6 +83,7 @@ expect_contains "api key file passed" "$out" "--api-key-file $TMP/keys"
 EXPECT="QLC_CTX must be" expect_fail "non-numeric ctx rejected" env QLC_CTX=big "$QLC" print-cmd
 EXPECT="QLC_UBATCH" expect_fail "ubatch > batch rejected" env QLC_UBATCH=4096 QLC_BATCH=512 "$QLC" print-cmd
 EXPECT="unknown profile" expect_fail "unknown profile rejected" env QLC_PROFILE=nope "$QLC" print-cmd
+EXPECT="QLC_UNIFIED_MEMORY must be" expect_fail "bad unified memory flag" env QLC_UNIFIED_MEMORY=yes "$QLC" print-cmd
 EXPECT="not found in locks" expect_fail "unknown model rejected" env QLC_MODEL=Q9 "$QLC" print-cmd
 EXPECT="unknown command" expect_fail "unknown command" "$QLC" frobnicate
 

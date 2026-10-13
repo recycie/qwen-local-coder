@@ -116,6 +116,7 @@ config_validate() {
   case "$QLC_FLASH_ATTN" in on|off|auto) ;; *) die "bad QLC_FLASH_ATTN: $QLC_FLASH_ATTN" ;; esac
   case "$QLC_SPEC_TYPE" in none|draft-mtp|ngram-mod|ngram-simple|draft-mtp,ngram-mod) ;; *) die "bad QLC_SPEC_TYPE: $QLC_SPEC_TYPE" ;; esac
   case "$QLC_ALLOW_INSECURE" in 0|1) ;; *) die "QLC_ALLOW_INSECURE must be 0 or 1" ;; esac
+  case "$QLC_UNIFIED_MEMORY" in 0|1) ;; *) die "QLC_UNIFIED_MEMORY must be 0 or 1" ;; esac
   [[ "$QLC_ALIAS" =~ ^[A-Za-z0-9._:-]+$ ]] || die "bad QLC_ALIAS: $QLC_ALIAS"
   if [[ -n "$QLC_API_KEY_FILE" ]]; then
     [[ -r "$QLC_API_KEY_FILE" ]] || die "QLC_API_KEY_FILE not readable: $QLC_API_KEY_FILE"
