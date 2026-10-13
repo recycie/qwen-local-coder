@@ -1,0 +1,23 @@
+[Unit]
+Description=Qwen3.8-27B local coding model (llama.cpp, OpenAI-compatible API)
+Documentation=https://github.com/recycie/qwen-local-coder
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=@QLC_ROOT@/bin/qlc start --foreground
+Restart=on-failure
+RestartSec=15
+# model load + mmap of ~8.4GB can take a while on a cold page cache
+TimeoutStartSec=300
+TimeoutStopSec=30
+KillSignal=SIGTERM
+# stop restarting after repeated OOMs instead of thrashing the GPU
+StartLimitIntervalSec=600
+StartLimitBurst=4
+NoNewPrivileges=yes
+Nice=5
+Environment=NO_COLOR=1
+
+[Install]
+WantedBy=default.target

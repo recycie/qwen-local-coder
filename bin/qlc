@@ -1,0 +1,458 @@
+#!/usr/bin/env bash
+# qlc - run Qwen3.8-27B locally as an OpenAI-compatible coding-agent backend.
+set -Eeuo pipefail
+shopt -s inherit_errexit
+
+QLC_ROOT=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
+readonly QLC_ROOT
+QLC_VERSION=$(<"$QLC_ROOT/VERSION")
+readonly QLC_VERSION
+# shellcheck source=lib/common.sh
+source "$QLC_ROOT/lib/common.sh"
+
+usage() {
+  cat <<EOF
+qlc $QLC_VERSION - local Qwen3.8-27B server (llama.cpp, OpenAI-compatible API)
+
+Usage: qlc <command> [options]
+
+Setup
+  install [--no-model]     download pinned llama.cpp + model, verify sha256
+  doctor                   check GPU, memory, disk and configuration
+  config                   print the resolved configuration
+  print-cmd                print the exact llama-server command line
+
+Run
+  start [--foreground] [--force]
+                           start the server (background unless --foreground)
+  stop                     stop the server
+  restart                  stop then start
+  status                   process, health, VRAM and slot state
+  health                   exit 0 if the server is ready
+  logs [-f]                show (or follow) the server log
+
+Tuning
+  bench [--tokens N] [--thinking]
+                           measure generation/prompt speed on the running server
+  tune [--from N] [--to N] [--step N]
+                           find the smallest stable QLC_CPU_FFN for this machine
+
+Service (systemd --user)
+  service install [--now]  install the user unit (starts on login)
+  service uninstall        remove the user unit
+
+Settings come from config/defaults.env < config/profiles/\$QLC_PROFILE.env
+< $(config_user_file) < QLC_* environment variables.
+EOF
+}
+
+# ---------------------------------------------------------------- command line
+
+build_cmd() {
+  local llama model
+  llama=$(llama_dir)
+  model=$(model_path)
+  SERVER_BIN="$llama/llama-server"
+  SERVER_LIB="$llama"
+  SERVER_CMD=(
+    "$SERVER_BIN"
+    --model "$model"
+    --alias "$QLC_ALIAS"
+    --host "$QLC_HOST" --port "$QLC_PORT"
+    --timeout "$QLC_TIMEOUT_S"
+    --n-gpu-layers 99
+    --flash-attn "$QLC_FLASH_ATTN"
+    --ctx-size "$QLC_CTX" --parallel 1
+    --batch-size "$QLC_BATCH" --ubatch-size "$QLC_UBATCH"
+    --cache-type-k "$QLC_KV_TYPE" --cache-type-v "$QLC_KV_TYPE"
+    --cache-ram "$QLC_CACHE_RAM_MIB"
+    --threads "$QLC_THREADS"
+    --jinja
+    --temp "$QLC_TEMP" --top-p "$QLC_TOP_P" --top-k "$QLC_TOP_K" --min-p "$QLC_MIN_P"
+    --metrics
+    --log-timestamps --log-colors off
+  )
+  if ((QLC_CPU_FFN > 0)); then
+    local i layers=""
+    for ((i = 0; i < QLC_CPU_FFN; i++)); do layers+="${layers:+|}$i"; done
+    # Keep attention, recurrent state, lm_head and the MTP head on the GPU;
+    # stream only the FFN weights of the first N layers from system RAM.
+    SERVER_CMD+=(--override-tensor "blk\\.(${layers})\\.ffn_(up|down|gate)\\.weight=CPU")
+  fi
+  if [[ "$QLC_SPEC_TYPE" != none ]]; then
+    # NB: do not quantize the draft KV cache (-ctkd/-ctvd); it OOM-crashes at runtime.
+    SERVER_CMD+=(--spec-type "$QLC_SPEC_TYPE" --spec-draft-n-max "$QLC_SPEC_N_MAX")
+  fi
+  [[ -n "$QLC_API_KEY_FILE" ]] && SERVER_CMD+=(--api-key-file "$QLC_API_KEY_FILE")
+  if [[ -n "$QLC_EXTRA_ARGS" ]]; then
+    local extra
+    read -r -a extra <<<"$QLC_EXTRA_ARGS"
+    SERVER_CMD+=("${extra[@]}")
+  fi
+}
+
+cmd_print_cmd() {
+  build_cmd
+  printf 'LD_LIBRARY_PATH=%q' "$SERVER_LIB"
+  printf ' %q' "${SERVER_CMD[@]}"
+  printf '\n'
+}
+
+cmd_config() {
+  local k
+  printf '# profile=%s user_config=%s\n' "$QLC_PROFILE" "$(config_user_file)"
+  for k in $_QLC_KNOWN; do
+    printf '%s=%s%s\n' "$k" "${!k}" "${_QLC_ENV_SET[$k]:+   # from environment}"
+  done
+}
+
+# ---------------------------------------------------------------- install
+
+cmd_install() {
+  local with_model=1
+  while (($#)); do
+    case "$1" in
+      --no-model) with_model=0 ;;
+      *) die "install: unknown option $1" ;;
+    esac
+    shift
+  done
+  require_cmd curl tar sha256sum df
+  local dl="$QLC_DATA_DIR/downloads" dest
+  dest=$(llama_dir)
+  if [[ -x "$dest/llama-server" && -f "$dest/.complete" ]]; then
+    log "llama.cpp already installed at $dest"
+  else
+    local llama_tgz cudart_tgz tmp
+    llama_tgz=$(fetch_artifact "llama-$QLC_LLAMA_VARIANT" "$dl")
+    cudart_tgz=$(fetch_artifact "cudart-$QLC_LLAMA_VARIANT" "$dl")
+    tmp=$(mktemp -d "$QLC_DATA_DIR/.extract.XXXXXX")
+    _QLC_TMP=$tmp
+    trap 'rm -rf -- "${_QLC_TMP:-}"' EXIT
+    tar -xzf "$llama_tgz" -C "$tmp" --no-same-owner
+    tar -xzf "$cudart_tgz" -C "$tmp" --no-same-owner
+    local bin_dir
+    bin_dir=$(dirname "$(find "$tmp" -type f -name llama-server -print -quit)")
+    [[ -x "$bin_dir/llama-server" ]] || die "llama-server not found in archive"
+    find "$tmp" -path '*cudart*' -type f -name 'lib*.so*' -exec cp -f -t "$bin_dir" {} +
+    rm -rf -- "$dest"
+    mkdir -p "$(dirname "$dest")"
+    mv -- "$bin_dir" "$dest"
+    touch "$dest/.complete"
+    rm -rf -- "$tmp"
+    log "llama.cpp installed at $dest"
+  fi
+  if LD_LIBRARY_PATH="$dest" "$dest/llama-server" --list-devices 2>&1 | grep -q 'CUDA0'; then
+    log "GPU detected: $(LD_LIBRARY_PATH="$dest" "$dest/llama-server" --list-devices 2>&1 | grep -m1 CUDA0 | sed 's/^ *//')"
+  else
+    warn "llama-server sees no CUDA device; check the NVIDIA driver (>= 580 for CUDA 13) or use QLC_LLAMA_VARIANT=cuda-12.8"
+  fi
+  if ((with_model)); then
+    fetch_artifact "model-$QLC_MODEL" "$QLC_MODELS_DIR" >/dev/null
+    log "model ready: $(model_path)"
+  fi
+  rm -rf -- "$dl"
+  log "install complete. Next: qlc start"
+}
+
+# ---------------------------------------------------------------- run
+
+preflight() {
+  local force=$1 model free
+  build_cmd
+  [[ -x "$SERVER_BIN" ]] || die "llama.cpp not installed ($SERVER_BIN missing). Run: qlc install"
+  model=$(model_path)
+  lock_get "model-$QLC_MODEL"
+  verify_file "$model" "$LOCK_SHA" "$LOCK_SIZE" || die "model missing or corrupt: $model. Run: qlc install"
+  port_in_use "$QLC_PORT" && die "port $QLC_PORT is already in use by another process"
+  if free=$(gpu_free_mib); then
+    if ((free < QLC_MIN_FREE_VRAM_MIB)); then
+      local msg="only ${free} MiB VRAM free (profile needs ${QLC_MIN_FREE_VRAM_MIB}); close GPU apps or raise QLC_CPU_FFN"
+      if ((force)); then warn "$msg"; else die "$msg (use --force to try anyway)"; fi
+    fi
+  else
+    warn "nvidia-smi unavailable; skipping VRAM check"
+  fi
+}
+
+rotate_log() {
+  local f=$1 max=$((50 * 1024 * 1024)) i
+  [[ -f "$f" ]] || return 0
+  (($(stat -c '%s' "$f") > max)) || return 0
+  for i in 2 1; do [[ -f "$f.$i" ]] && mv -f -- "$f.$i" "$f.$((i + 1))"; done
+  mv -f -- "$f" "$f.1"
+}
+
+cmd_start() {
+  local fg=0 force=0
+  while (($#)); do
+    case "$1" in
+      --foreground|-f) fg=1 ;;
+      --force) force=1 ;;
+      *) die "start: unknown option $1" ;;
+    esac
+    shift
+  done
+  mkdir -p "$QLC_STATE_DIR/run" "$QLC_STATE_DIR/logs"
+  exec 9>"$QLC_STATE_DIR/run/lock-$QLC_PORT"
+  flock -n 9 || die "another qlc operation holds the lock for port $QLC_PORT"
+  local pid
+  if pid=$(server_pid); then
+    log "already running (pid $pid) at $(base_url)/v1"
+    return 0
+  fi
+  preflight "$force"
+  if ((fg)); then
+    log "starting in foreground on $(base_url)/v1"
+    printf '%s\n' "$$" >"$(pid_file)"
+    exec 9>&-
+    LD_LIBRARY_PATH="$SERVER_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec "${SERVER_CMD[@]}"
+  fi
+  local lf
+  lf=$(log_file)
+  rotate_log "$lf"
+  printf '\n===== qlc %s start %s =====\n' "$QLC_VERSION" "$(date -Is)" >>"$lf"
+  LD_LIBRARY_PATH="$SERVER_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+    setsid "${SERVER_CMD[@]}" >>"$lf" 2>&1 </dev/null 9>&- &
+  pid=$!
+  printf '%s\n' "$pid" >"$(pid_file)"
+  log "started pid $pid, loading model (log: $lf)"
+  local deadline=$((SECONDS + QLC_START_TIMEOUT_S)) code
+  while ((SECONDS < deadline)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f -- "$(pid_file)"
+      grep -E ' E |error|out of memory' "$lf" | tail -n 8 >&2 || true
+      die "server exited during startup (see $lf)"
+    fi
+    code=$(health_status)
+    if [[ "$code" == 200 ]]; then
+      log "ready at $(base_url)/v1 (model: $QLC_ALIAS)"
+      return 0
+    fi
+    sleep 1
+  done
+  kill -TERM "$pid" 2>/dev/null || true
+  rm -f -- "$(pid_file)"
+  die "server not healthy after ${QLC_START_TIMEOUT_S}s (see $lf)"
+}
+
+cmd_stop() {
+  local pid
+  if ! pid=$(server_pid); then
+    rm -f -- "$(pid_file)"
+    log "not running"
+    return 0
+  fi
+  log "stopping pid $pid"
+  kill -TERM "$pid"
+  local deadline=$((SECONDS + QLC_STOP_TIMEOUT_S))
+  while kill -0 "$pid" 2>/dev/null && ((SECONDS < deadline)); do sleep 0.5; done
+  if kill -0 "$pid" 2>/dev/null; then
+    warn "did not exit after ${QLC_STOP_TIMEOUT_S}s, sending SIGKILL"
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f -- "$(pid_file)"
+  log "stopped"
+}
+
+cmd_status() {
+  local pid code rc=0
+  if pid=$(server_pid); then
+    printf 'process : running (pid %s, up %ss)\n' "$pid" "$(ps -o etimes= -p "$pid" | tr -d ' ')"
+  else
+    printf 'process : not running\n'
+    rc=3
+  fi
+  code=$(health_status)
+  case "$code" in
+    200) printf 'health  : ready\n' ;;
+    503) printf 'health  : loading\n' ;;
+    000) printf 'health  : unreachable\n' ;;
+    *)   printf 'health  : HTTP %s\n' "$code" ;;
+  esac
+  printf 'endpoint: %s/v1  (model: %s)\n' "$(base_url)" "$QLC_ALIAS"
+  printf 'model   : %s\n' "$(model_path)"
+  printf 'layout  : ctx=%s cpu_ffn=%s kv=%s spec=%s(n=%s)\n' \
+    "$QLC_CTX" "$QLC_CPU_FFN" "$QLC_KV_TYPE" "$QLC_SPEC_TYPE" "$QLC_SPEC_N_MAX"
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    printf 'gpu     : %s\n' "$(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader | head -1)"
+  fi
+  if [[ "$code" == 200 ]] && command -v python3 >/dev/null 2>&1; then
+    api_curl "$(base_url)/metrics" 2>/dev/null | python3 -I -c '
+import sys
+want = {"llamacpp:prompt_tokens_total": "prompt tokens", "llamacpp:tokens_predicted_total": "generated tokens",
+        "llamacpp:predicted_tokens_seconds": "gen tok/s (avg)", "llamacpp:requests_processing": "requests active"}
+for line in sys.stdin:
+    k, _, v = line.strip().partition(" ")
+    if k in want:
+        print(f"{want[k]:<17}: {float(v):g}")
+' || true
+  fi
+  return "$rc"
+}
+
+cmd_health() {
+  [[ "$(health_status)" == 200 ]]
+}
+
+cmd_logs() {
+  local lf
+  lf=$(log_file)
+  [[ -f "$lf" ]] || die "no log yet at $lf (in service mode use: journalctl --user -u qwen-local-coder)"
+  if [[ "${1:-}" == -f ]]; then tail -n 50 -F "$lf"; else tail -n 200 "$lf"; fi
+}
+
+# ---------------------------------------------------------------- bench / tune
+
+# _request <max_tokens> <thinking:true|false> <prompt-repeat> -> prints one result line
+_request() {
+  local max=$1 think=$2 rep=$3
+  require_cmd python3
+  python3 -I - "$(base_url)" "$QLC_ALIAS" "$max" "$think" "$rep" "${QLC_API_KEY_FILE:-}" <<'PY'
+import json, sys, time, urllib.request
+url, model, max_tokens, think, rep, keyfile = sys.argv[1:7]
+filler = ("def handler(event, ctx):\n    # validate, transform and persist the incoming record\n"
+          "    data = json.loads(event['body'])\n    return {'status': 200, 'id': data.get('id')}\n\n")
+prompt = (filler * int(rep)) + "Write a Python LRU cache class with O(1) get/put using OrderedDict, plus 3 pytest tests. Code only."
+body = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": int(max_tokens),
+        "cache_prompt": False, "chat_template_kwargs": {"enable_thinking": think == "true"}}
+headers = {"Content-Type": "application/json"}
+if keyfile:
+    key = next((l.strip() for l in open(keyfile) if l.strip() and not l.startswith("#")), "")
+    headers["Authorization"] = f"Bearer {key}"
+req = urllib.request.Request(url + "/v1/chat/completions", json.dumps(body).encode(), headers)
+t0 = time.time()
+d = json.load(urllib.request.urlopen(req, timeout=1800))
+t = d.get("timings", {})
+acc, drafted = t.get("draft_n_accepted"), t.get("draft_n")
+spec = f" draft_accept={acc / drafted:.0%}" if drafted else ""
+print(f"prompt={t.get('prompt_n')} tok @ {t.get('prompt_per_second', 0):.1f} tok/s | "
+      f"gen={t.get('predicted_n')} tok @ {t.get('predicted_per_second', 0):.1f} tok/s{spec} | wall={time.time() - t0:.1f}s")
+PY
+}
+
+cmd_bench() {
+  local tokens=256 think=false
+  while (($#)); do
+    case "$1" in
+      --tokens) tokens=${2:?}; shift ;;
+      --thinking) think=true ;;
+      *) die "bench: unknown option $1" ;;
+    esac
+    shift
+  done
+  cmd_health || die "server is not ready; run: qlc start"
+  log "short prompt"
+  API_TIMEOUT=1800 _request "$tokens" "$think" 0
+  log "~2k-token prompt"
+  API_TIMEOUT=1800 _request 32 false 45
+}
+
+cmd_tune() {
+  local from=50 to=64 step=2
+  while (($#)); do
+    case "$1" in
+      --from) from=${2:?}; shift ;;
+      --to) to=${2:?}; shift ;;
+      --step) step=${2:?}; shift ;;
+      *) die "tune: unknown option $1" ;;
+    esac
+    shift
+  done
+  server_pid >/dev/null && die "a server is running on port $QLC_PORT; stop it first (qlc stop)"
+  log "searching QLC_CPU_FFN in [$from..$to] step $step at ctx=$QLC_CTX (lower = faster)"
+  local k out
+  for ((k = from; k <= to; k += step)); do
+    log "trying QLC_CPU_FFN=$k"
+    if ! QLC_CPU_FFN=$k "$QLC_ROOT/bin/qlc" start --force >/dev/null 2>&1; then
+      log "  k=$k: failed to start (OOM)"
+      continue
+    fi
+    if out=$(QLC_CPU_FFN=$k _request 128 false 45 2>&1) && QLC_CPU_FFN=$k "$QLC_ROOT/bin/qlc" health; then
+      log "  k=$k: stable -> $out"
+      QLC_CPU_FFN=$k "$QLC_ROOT/bin/qlc" stop >/dev/null 2>&1 || true
+      printf '\nRecommended: add to %s\n  QLC_CPU_FFN=%s\n' "$(config_user_file)" "$k"
+      printf 'Keep a margin: use %s if you run other GPU apps.\n' "$((k + 2))"
+      return 0
+    fi
+    log "  k=$k: crashed under load"
+    QLC_CPU_FFN=$k "$QLC_ROOT/bin/qlc" stop >/dev/null 2>&1 || true
+  done
+  die "no stable value found in [$from..$to]; lower QLC_CTX or free VRAM"
+}
+
+# ---------------------------------------------------------------- doctor / service
+
+cmd_doctor() {
+  local ok=1
+  printf 'qlc %s (root %s)\n' "$QLC_VERSION" "$QLC_ROOT"
+  for c in curl tar sha256sum python3 nvidia-smi flock setsid; do
+    if command -v "$c" >/dev/null 2>&1; then printf '  [ok]   %s\n' "$c"; else printf '  [miss] %s\n' "$c"; ok=0; fi
+  done
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    printf 'GPU: %s\n' "$(nvidia-smi --query-gpu=name,driver_version,memory.total,memory.free --format=csv,noheader | head -1)"
+  fi
+  printf 'RAM: %s total, %s available\n' \
+    "$(free -h | awk '/^Mem:/{print $2}')" "$(free -h | awk '/^Mem:/{print $7}')"
+  printf 'CPU: %s (%s threads)\n' "$(lscpu | sed -n 's/^Model name: *//p')" "$(nproc)"
+  printf 'Disk free in %s: %s\n' "$QLC_DATA_DIR" "$(df -h --output=avail "$(dirname "$QLC_DATA_DIR")" 2>/dev/null | tail -1 | tr -d ' ')"
+  if [[ -x "$(llama_dir)/llama-server" ]]; then printf 'llama.cpp: installed\n'; else printf 'llama.cpp: NOT installed\n'; ok=0; fi
+  local m
+  m=$(model_path)
+  if [[ -f "$m" ]]; then printf 'model: %s\n' "$m"; else printf 'model: NOT downloaded (%s)\n' "$m"; ok=0; fi
+  printf 'Generation speed is bounded by RAM bandwidth: ~%s GiB of FFN weights are read per token.\n' \
+    "$(( (QLC_CPU_FFN * 90) / 1024 ))"
+  if ((ok)); then log "doctor: all good"; else warn "doctor: issues found (see above)"; fi
+}
+
+cmd_service() {
+  local unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user" unit="qwen-local-coder.service"
+  require_cmd systemctl
+  case "${1:-}" in
+    install)
+      mkdir -p "$unit_dir"
+      sed "s|@QLC_ROOT@|$QLC_ROOT|g" "$QLC_ROOT/systemd/$unit" >"$unit_dir/$unit"
+      systemctl --user daemon-reload
+      if [[ "${2:-}" == --now ]]; then systemctl --user enable --now "$unit"; else systemctl --user enable "$unit"; fi
+      log "installed $unit_dir/$unit"
+      log "to keep it running while logged out: loginctl enable-linger $USER"
+      ;;
+    uninstall)
+      systemctl --user disable --now "$unit" 2>/dev/null || true
+      rm -f -- "$unit_dir/$unit"
+      systemctl --user daemon-reload
+      log "removed $unit"
+      ;;
+    *) die "usage: qlc service install [--now] | uninstall" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- main
+
+main() {
+  local cmd=${1:-help}
+  (($#)) && shift
+  case "$cmd" in
+    help|-h|--help) usage; return 0 ;;
+    version|--version) printf '%s\n' "$QLC_VERSION"; return 0 ;;
+  esac
+  config_load "$QLC_ROOT"
+  case "$cmd" in
+    install)   cmd_install "$@" ;;
+    doctor)    cmd_doctor ;;
+    config)    cmd_config ;;
+    print-cmd) cmd_print_cmd ;;
+    start)     cmd_start "$@" ;;
+    stop)      cmd_stop ;;
+    restart)   cmd_stop; cmd_start "$@" ;;
+    status)    cmd_status ;;
+    health)    cmd_health ;;
+    logs)      cmd_logs "$@" ;;
+    bench)     cmd_bench "$@" ;;
+    tune)      cmd_tune "$@" ;;
+    service)   cmd_service "$@" ;;
+    *) usage >&2; die "unknown command: $cmd" 2 ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,21 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -x -S style bin/qlc lib/common.sh tests/test_cli.sh
+      - name: bash syntax
+        run: for f in bin/qlc lib/common.sh tests/test_cli.sh; do bash -n "$f"; done
+      - name: CLI tests
+        run: tests/test_cli.sh

@@ -1,0 +1,8 @@
+*.gguf
+*.part
+*.verified
+*.log
+/downloads/
+.env
+config.env
+api-keys
