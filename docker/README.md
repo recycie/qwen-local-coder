@@ -16,7 +16,7 @@ From the repository root, with the quality GGUF already installed:
 ```bash
 # If needed: bin/qlc install
 python3 docker/setup.py --models-dir "$HOME/models"
-docker compose --project-directory docker up -d --build --wait --wait-timeout 300
+(cd docker && docker compose up -d --build --wait --wait-timeout 300)
 python3 docker/bootstrap.py
 ```
 
@@ -60,11 +60,11 @@ inside another container point to that container, not this gateway.
 ## Operations
 
 ```bash
-docker compose --project-directory docker ps
-docker compose --project-directory docker logs --tail 100 inference gateway
-docker compose --project-directory docker stop
+(cd docker && docker compose ps)
+(cd docker && docker compose logs --tail 100 inference gateway)
+(cd docker && docker compose stop)
 # Start again, preserving all data:
-docker compose --project-directory docker up -d
+(cd docker && docker compose up -d)
 ```
 
 Restart policy is `unless-stopped`. Portainer has Docker socket access so its

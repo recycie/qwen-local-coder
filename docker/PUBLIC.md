@@ -53,8 +53,8 @@ PUBLIC_INFRA_URL=https://llm-infra.cookeebit.cloud
 From the repository root:
 
 ```bash
-docker compose --project-directory docker config --quiet
-docker compose --project-directory docker up -d --build --wait --wait-timeout 300
+(cd docker && docker compose config --quiet)
+(cd docker && docker compose up -d --build --wait --wait-timeout 300)
 python3 docker/bootstrap.py
 ```
 
