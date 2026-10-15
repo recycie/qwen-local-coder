@@ -2,6 +2,15 @@
 set -Eeuo pipefail
 # Unset entirely: even GGML_CUDA_ENABLE_UNIFIED_MEMORY=0 enables managed memory.
 unset GGML_CUDA_ENABLE_UNIFIED_MEMORY
+model=Qwen3.8-27B-GSQ-RCO-IQ2_XS-mtp.gguf
+if [[ ${INFERENCE_PROFILE:-quality} == fast ]]; then
+  model=Qwen3.8-27B-UD-IQ1_M.gguf
+  export GGML_CUDA_ENABLE_UNIFIED_MEMORY=1
+  CPU_FFN=0
+  CTX=4096
+  UBATCH=512
+  SPEC_TYPE=ngram-mod
+fi
 cpu_ffn=${CPU_FFN:-64}
 if [[ ! $cpu_ffn =~ ^(0|[1-9][0-9]?)$ ]] || ((cpu_ffn > 64)); then
   echo "CPU_FFN must be 0..64" >&2
@@ -15,12 +24,13 @@ fi
 spec_args=()
 case ${SPEC_TYPE:-none} in
   none) ;;
+  ngram-mod) spec_args=(--spec-type ngram-mod) ;;
   draft-mtp) spec_args=(--spec-type draft-mtp --spec-draft-n-max 2) ;;
-  *) echo "SPEC_TYPE must be none or draft-mtp" >&2; exit 2 ;;
+  *) echo "SPEC_TYPE must be none, draft-mtp or ngram-mod" >&2; exit 2 ;;
 esac
 rm -f /tmp/model-ready
 /opt/llama/llama-server \
-  -m /models/Qwen3.8-27B-GSQ-RCO-IQ2_XS-mtp.gguf --alias qwen3.8-27b \
+  -m "/models/$model" --alias qwen3.8-27b \
   -ngl 99 "${override[@]}" "${spec_args[@]}" \
   -c "${CTX:-32768}" -np 1 -fa on -ctk q8_0 -ctv q8_0 -ub "${UBATCH:-256}" \
   -t "${THREADS:-6}" --jinja --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0 \

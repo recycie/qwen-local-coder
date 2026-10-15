@@ -112,3 +112,19 @@ returned 404. A real UI-session poem request completed (128 output tokens), and
 public SSE generation passed. Inference stayed healthy with zero restarts after
 the memory-profile fix. The old environment-password login returned 401 while
 the new database admin login succeeded.
+
+## Restore the short-context fast profile
+
+Set `INFERENCE_PROFILE=fast` in private `docker/.env`, then recreate inference:
+
+```bash
+(cd docker && docker compose up -d --build --no-deps inference)
+```
+
+This selects the existing `Qwen3.8-27B-UD-IQ1_M.gguf`, whole-model GPU managed
+memory, ngram speculation, 4,096-token context and 512-token microbatches. It
+overrides CTX/CPU_FFN/UBATCH/SPEC_TYPE while selected. The API model alias stays
+`qwen3.8-27b`. The smaller quantization trades accuracy for speed; long agent
+prompts must fit the 4K total input/output budget. The first request can be slow
+as managed-memory pages migrate. Set `INFERENCE_PROFILE=quality` to restore the
+32K quality profile. See the measured limitations in [tuning notes](../docs/TUNING.md).

@@ -9,6 +9,7 @@ services:
     security_opt:
       - label=disable
     environment:
+      INFERENCE_PROFILE: ${INFERENCE_PROFILE:-quality}
       CTX: ${CTX:-32768}
       CPU_FFN: ${CPU_FFN:-64}
       THREADS: ${THREADS:-6}
