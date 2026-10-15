@@ -53,6 +53,12 @@ real accuracy, and thinking mode does not recover it (14/20 with thinking).
 system-RAM bandwidth (~17 GB/s measured), not by the GPU. A 16 GB card would let 2.5–3.5-bit weights
 live entirely in VRAM; see [docs/TUNING.md](docs/TUNING.md) for every measurement and what would help.
 
+## Docker API and management dashboards
+
+Use the [Docker stack](docker/README.md) for a persistent OpenAI-compatible API
+with LiteLLM virtual keys/rate limits/token usage and a Portainer CE infra UI.
+It runs the quality profile and keeps its own PostgreSQL database.
+
 ## Requirements
 
 - Linux x86_64, bash ≥ 4.4, `curl`, `tar`, `sha256sum`, `flock`, `setsid`, `python3` (bench/status only)

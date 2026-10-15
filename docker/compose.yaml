@@ -1,0 +1,91 @@
+name: qlc
+services:
+  inference:
+    image: qwen-local-coder:llama-b11576
+    build: .
+    restart: unless-stopped
+    devices:
+      - nvidia.com/gpu=all
+    security_opt:
+      - label=disable
+    environment:
+      CTX: ${CTX:-32768}
+      CPU_FFN: ${CPU_FFN:-60}
+      THREADS: ${THREADS:-6}
+    volumes:
+      - ${MODELS_DIR:?set MODELS_DIR}:/models:ro
+    secrets:
+      - llama_api_key
+    networks: [backend]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8080/health]
+      interval: 20s
+      timeout: 5s
+      retries: 6
+      start_period: 180s
+    stop_grace_period: 30s
+    logging: &logs
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  gateway:
+    image: ${LITELLM_IMAGE:-ghcr.io/berriai/litellm:v1.105.1@sha256:b7b9e2c306343721802253d0dd9436b9634a2eb4e14da7c7cf06c5c7b7530802}
+    restart: unless-stopped
+    command: [--config, /app/config.yaml, --port, '4000', --num_workers, '1']
+    ports: ['127.0.0.1:${API_PORT:-4000}:4000']
+    environment:
+      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD:?set database password}@db:5432/litellm
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set master key}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:?set permanent salt}
+      LLAMA_API_KEY: ${LLAMA_API_KEY:?set backend key}
+      UI_USERNAME: admin
+      UI_PASSWORD: ${UI_PASSWORD:?set UI password}
+      STORE_MODEL_IN_DB: 'True'
+      LITELLM_TELEMETRY: 'False'
+      LITELLM_LOCAL_MODEL_COST_MAP: 'True'
+    volumes: ['./litellm.yaml:/app/config.yaml:ro,Z']
+    depends_on:
+      db: {condition: service_healthy}
+      inference: {condition: service_healthy}
+    networks: [backend, api]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=5)"]
+      interval: 20s
+      timeout: 10s
+      retries: 8
+      start_period: 180s
+    logging: *logs
+  db:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: litellm
+      POSTGRES_DB: litellm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set database password}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U litellm -d litellm]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *logs
+  infra:
+    image: ${PORTAINER_IMAGE:-portainer/portainer-ce:2.45.2@sha256:03f94a406496dc84d37b552795fc424ccad8d0d7200353b6a82915f6e8f73ab0}
+    restart: unless-stopped
+    ports: ['127.0.0.1:${INFRA_PORT:-9443}:9443']
+    security_opt: [label=disable]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks: [api]
+    logging: *logs
+networks:
+  backend:
+  api:
+    name: qlc-api
+volumes:
+  postgres_data:
+  portainer_data:
+secrets:
+  llama_api_key:
+    file: ./.runtime/llama-api-key

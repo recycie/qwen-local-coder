@@ -14,8 +14,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck -x -S style bin/qlc lib/common.sh tests/test_cli.sh
+        run: shellcheck -x -S style bin/qlc lib/common.sh tests/test_cli.sh docker/inference-entrypoint.sh
       - name: bash syntax
-        run: for f in bin/qlc lib/common.sh tests/test_cli.sh; do bash -n "$f"; done
+        run: for f in bin/qlc lib/common.sh tests/test_cli.sh docker/inference-entrypoint.sh; do bash -n "$f"; done
       - name: CLI tests
         run: tests/test_cli.sh
+      - name: Docker helper syntax
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          for p in Path("docker").glob("*.py"):
+              compile(p.read_text(), str(p), "exec")
+          PYTHON
