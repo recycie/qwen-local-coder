@@ -121,10 +121,28 @@ Set `INFERENCE_PROFILE=fast` in private `docker/.env`, then recreate inference:
 (cd docker && docker compose up -d --build --no-deps inference)
 ```
 
-This selects the existing `Qwen3.8-27B-UD-IQ1_M.gguf`, whole-model GPU managed
-memory, ngram speculation, 4,096-token context and 512-token microbatches. It
+This selects the existing `Qwen3.8-27B-UD-IQ1_M.gguf`, GPU managed memory,
+4,096-token context and 512-token microbatches. `FAST_CPU_FFN` defaults to 0
+and controls how many FFN layers stay on CPU. `FAST_SPEC_TYPE` defaults to
+`none`; set it to `ngram-mod` to reproduce the original speculative profile. It
 overrides CTX/CPU_FFN/UBATCH/SPEC_TYPE while selected. The API model alias stays
 `qwen3.8-27b`. The smaller quantization trades accuracy for speed; long agent
 prompts must fit the 4K total input/output budget. The first request can be slow
 as managed-memory pages migrate. Set `INFERENCE_PROFILE=quality` to restore the
 32K quality profile. See the measured limitations in [tuning notes](../docs/TUNING.md).
+
+Recheck under the current desktop load did not reproduce the historical 30+
+tok/s result. Whole-model GPU and small CPU-offload configurations hit managed
+memory paging. With `FAST_CPU_FFN=6` and `FAST_SPEC_TYPE=none`, the synthetic
+2,159-token Python prompt / 32-token continuation measured 2.29 tok/s on its first
+run and 17.18 tok/s on the cached second run. Eight CPU FFN layers measured
+14.05 and 14.42 tok/s. These short measurements are throughput checks, not a
+quality evaluation or a guarantee for arbitrary context lengths. The tested
+CUDA preferred-location shim and PowerMizer change did not resolve the paging;
+neither experiment is enabled in the running deployment.
+
+The retained deployment uses six CPU FFN layers and speculation disabled. A
+public HTTPS streaming code request then generated 128 tokens in 7.435 seconds
+(17.08 generation tok/s), with first visible content at 1.75 seconds and total
+wall time 9.18 seconds. The response contained 485 visible characters. Context
+remains 4K; this validates a short request, not sustained full-context throughput.

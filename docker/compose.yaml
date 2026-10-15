@@ -10,6 +10,8 @@ services:
       - label=disable
     environment:
       INFERENCE_PROFILE: ${INFERENCE_PROFILE:-quality}
+      FAST_CPU_FFN: ${FAST_CPU_FFN:-0}
+      FAST_SPEC_TYPE: ${FAST_SPEC_TYPE:-none}
       CTX: ${CTX:-32768}
       CPU_FFN: ${CPU_FFN:-64}
       THREADS: ${THREADS:-6}

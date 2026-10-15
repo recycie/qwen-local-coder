@@ -6,10 +6,10 @@ model=Qwen3.8-27B-GSQ-RCO-IQ2_XS-mtp.gguf
 if [[ ${INFERENCE_PROFILE:-quality} == fast ]]; then
   model=Qwen3.8-27B-UD-IQ1_M.gguf
   export GGML_CUDA_ENABLE_UNIFIED_MEMORY=1
-  CPU_FFN=0
+  CPU_FFN=${FAST_CPU_FFN:-0}
   CTX=4096
   UBATCH=512
-  SPEC_TYPE=ngram-mod
+  SPEC_TYPE=${FAST_SPEC_TYPE:-none}
 fi
 cpu_ffn=${CPU_FFN:-64}
 if [[ ! $cpu_ffn =~ ^(0|[1-9][0-9]?)$ ]] || ((cpu_ffn > 64)); then
