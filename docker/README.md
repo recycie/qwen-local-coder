@@ -16,7 +16,7 @@ From the repository root, with the quality GGUF already installed:
 ```bash
 # If needed: bin/qlc install
 python3 docker/setup.py --models-dir "$HOME/models"
-docker compose -f docker/compose.yaml up -d --build --wait --wait-timeout 300
+docker compose --project-directory docker up -d --build --wait --wait-timeout 300
 python3 docker/bootstrap.py
 ```
 
@@ -28,12 +28,15 @@ All public ports bind to loopback by default:
 | LiteLLM keys / model routing / usage UI | http://127.0.0.1:4000/ui/ |
 | Portainer infrastructure / container logs / stats | https://127.0.0.1:9443 |
 
-Portainer uses a self-signed certificate. Both admin usernames are `admin`, with
-different randomly generated passwords. Credentials and the separate client API
+Portainer uses a self-signed certificate and username `admin`. LiteLLM uses a
+database-backed admin (`admin@local.invalid` by default; configure with
+`setup.py --admin-email`). Each account has a different random password. Credentials and the separate client API
 key are saved to `~/.config/qwen-local-coder/docker-access.env` (mode 600).
 They are not included in Git. Setup/bootstrap can be rerun without regenerating
 existing credentials. If you change an admin password in the UI, update your
-private access file; bootstrap's environment login will no longer match it.
+private access file and the matching private `.env` value before rerunning
+bootstrap. Bootstrap preserves existing accounts and passwords. Environment
+credential login is disabled; the master key remains a management API credential.
 
 The client key is named `local-dev`, scoped to `qwen3.8-27b`, with 6 requests/min,
 120,000 tokens/min and 1 parallel request. Change limits or create/revoke keys in
@@ -57,15 +60,15 @@ inside another container point to that container, not this gateway.
 ## Operations
 
 ```bash
-docker compose -f docker/compose.yaml ps
-docker compose -f docker/compose.yaml logs --tail 100 inference gateway
-docker compose -f docker/compose.yaml stop
+docker compose --project-directory docker ps
+docker compose --project-directory docker logs --tail 100 inference gateway
+docker compose --project-directory docker stop
 # Start again, preserving all data:
-docker compose -f docker/compose.yaml up -d
+docker compose --project-directory docker up -d
 ```
 
 Restart policy is `unless-stopped`. Portainer has Docker socket access so its
-admin can manage this host's containers. Model parameters CTX, CPU_FFN and
+admin can manage this host's containers. Model parameters CTX, CPU_FFN, UBATCH, SPEC_TYPE and
 THREADS can be set in `docker/.env`; then recreate only inference with Compose.
 Portainer can start/stop containers and inspect resources/logs; Compose remains
 the source of truth for this externally created stack's configuration.
@@ -89,3 +92,23 @@ and infrastructure databases is intended. GGUFs remain in the host models folder
 
 Upstream: [LiteLLM](https://docs.litellm.ai/docs/proxy/docker_quick_start),
 [Portainer CE](https://docs.portainer.io/start/install-ce/server/docker/linux).
+
+## Stable inference and public access
+
+The default profile keeps 32K context, moves all 64 FFN layers to CPU, uses
+256-token microbatches and disables speculative MTP decoding. These defaults
+leave VRAM headroom for generation on the tested 8GB GPU. Speculative decoding
+can be enabled with `SPEC_TYPE=draft-mtp` after checking memory under load.
+Readiness requires a real authenticated generation warm-up, not just model load.
+The gateway defaults to 1,024 output tokens with thinking disabled; callers can
+override these request settings. Long-context throughput is not guaranteed.
+
+See [public deployment](PUBLIC.md) for the Cloudflare Tunnel deployment.
+Compose commands above preserve the public override selected in `docker/.env`.
+
+Additional verification on 2026-10-15: public HTTPS UI, API and Portainer login
+passed; unauthenticated API access returned 401 and admin paths on the API host
+returned 404. A real UI-session poem request completed (128 output tokens), and
+public SSE generation passed. Inference stayed healthy with zero restarts after
+the memory-profile fix. The old environment-password login returned 401 while
+the new database admin login succeeded.

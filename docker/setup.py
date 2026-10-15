@@ -8,6 +8,7 @@ import secrets
 ROOT = Path(__file__).resolve().parent
 parser = argparse.ArgumentParser()
 parser.add_argument('--models-dir', type=Path, default=Path.home() / 'models')
+parser.add_argument('--admin-email', default='admin@local.invalid')
 args = parser.parse_args()
 model = args.models_dir.expanduser().resolve() / 'Qwen3.8-27B-GSQ-RCO-IQ2_XS-mtp.gguf'
 if not model.is_file():
@@ -21,7 +22,8 @@ if not path.exists():
         'LITELLM_MASTER_KEY': 'sk-' + secrets.token_hex(32),
         'LITELLM_SALT_KEY': 'sk-' + secrets.token_hex(32),
         'LLAMA_API_KEY': 'sk-' + secrets.token_hex(32),
-        'UI_PASSWORD': secrets.token_urlsafe(24),
+        'LITELLM_ADMIN_USERNAME': args.admin_email,
+        'LITELLM_ADMIN_PASSWORD': secrets.token_urlsafe(28),
         'PORTAINER_PASSWORD': secrets.token_urlsafe(24),
     }
     with path.open('x') as f:
@@ -29,6 +31,12 @@ if not path.exists():
 else:
     values = dict(line.split('=', 1) for line in path.read_text().splitlines()
                   if '=' in line and not line.startswith('#'))
+if 'LITELLM_ADMIN_USERNAME' not in values:
+    values['LITELLM_ADMIN_USERNAME'] = args.admin_email
+    values['LITELLM_ADMIN_PASSWORD'] = secrets.token_urlsafe(28)
+    with path.open('a') as f:
+        for name in ['LITELLM_ADMIN_USERNAME', 'LITELLM_ADMIN_PASSWORD']:
+            f.write(name + '=' + values[name] + '\n')
 path.chmod(0o600)
 runtime = ROOT / '.runtime'
 runtime.mkdir(exist_ok=True, mode=0o700)

@@ -1,0 +1,48 @@
+services:
+  gateway:
+    environment:
+      PROXY_BASE_URL: https://llm.cookeebit.cloud
+      # Host port is loopback-only; public traffic arrives through edge.
+      FORWARDED_ALLOW_IPS: "*"
+      LITELLM_UI_API_DOC_BASE_URL: https://llm-api.cookeebit.cloud
+  infra:
+    environment:
+      TRUSTED_ORIGINS: https://llm-infra.cookeebit.cloud
+  edge:
+    image: nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=64m
+      - /var/run:size=16m
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro,Z
+    networks: [api]
+    depends_on:
+      gateway: {condition: service_healthy}
+      infra: {condition: service_started}
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  tunnel:
+    image: cloudflare/cloudflared@sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07
+    restart: unless-stopped
+    user: '0:0'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true, label=disable]
+    command: [tunnel, --no-autoupdate, --config, /etc/cloudflared/config.yml, run]
+    volumes:
+      - ./.runtime/cloudflared/config.yml:/etc/cloudflared/config.yml:ro
+      - ./.runtime/cloudflared/tunnel.json:/etc/cloudflared/tunnel.json:ro
+    networks: [api]
+    depends_on:
+      edge: {condition: service_healthy}
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}

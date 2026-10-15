@@ -10,15 +10,17 @@ services:
       - label=disable
     environment:
       CTX: ${CTX:-32768}
-      CPU_FFN: ${CPU_FFN:-60}
+      CPU_FFN: ${CPU_FFN:-64}
       THREADS: ${THREADS:-6}
+      UBATCH: ${UBATCH:-256}
+      SPEC_TYPE: ${SPEC_TYPE:-none}
     volumes:
       - ${MODELS_DIR:?set MODELS_DIR}:/models:ro
     secrets:
       - llama_api_key
     networks: [backend]
     healthcheck:
-      test: [CMD, curl, -fsS, http://localhost:8080/health]
+      test: [CMD-SHELL, "test -f /tmp/model-ready && curl -fsS http://localhost:8080/health"]
       interval: 20s
       timeout: 5s
       retries: 6
@@ -37,8 +39,6 @@ services:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set master key}
       LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:?set permanent salt}
       LLAMA_API_KEY: ${LLAMA_API_KEY:?set backend key}
-      UI_USERNAME: admin
-      UI_PASSWORD: ${UI_PASSWORD:?set UI password}
       STORE_MODEL_IN_DB: 'True'
       LITELLM_TELEMETRY: 'False'
       LITELLM_LOCAL_MODEL_COST_MAP: 'True'

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Initialize local dashboards/client key; never print secrets."""
 import json
+import base64
 import os
 from pathlib import Path
 import re
@@ -9,6 +10,7 @@ import ssl
 import subprocess
 import urllib.error
 import urllib.request
+import urllib.parse
 import uuid
 
 ROOT = Path(__file__).resolve().parent
@@ -70,6 +72,54 @@ call(PORTAINER, f"/api/endpoints/{local['Id']}/docker/info", headers=headers)
 print('Portainer login and Docker connection verified.')
 
 admin = {'Authorization': 'Bearer ' + ENV['LITELLM_MASTER_KEY']}
+# Provision a database-backed admin through the same invitation flow as the UI.
+# Management APIs intentionally do not accept setting another user's password.
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def admin_login_ok():
+    request = urllib.request.Request(GATEWAY + '/login', urllib.parse.urlencode({
+        'username': ENV['LITELLM_ADMIN_USERNAME'],
+        'password': ENV['LITELLM_ADMIN_PASSWORD'],
+    }).encode())
+    try:
+        urllib.request.build_opener(NoRedirect()).open(request, timeout=30)
+    except urllib.error.HTTPError as error:
+        if error.code in (302, 303):
+            target = urllib.parse.urlparse(error.headers.get('Location', ''))
+            return target.path.startswith('/ui') and 'login=success' in target.query
+        if error.code in (400, 401, 403):
+            return False
+        raise
+    return False
+
+
+if not admin_login_ok():
+    user = call(GATEWAY, '/user/info?user_id=qlc-operator', headers=admin)
+    if user and user.get('user_info'):
+        raise SystemExit('Operator account already exists but stored password does not match. '
+                         'Preserving its password; update private credentials before retrying.')
+    call(GATEWAY, '/user/new', {
+        'user_id': 'qlc-operator', 'user_email': ENV['LITELLM_ADMIN_USERNAME'],
+        'user_role': 'proxy_admin', 'auto_create_key': False, 'send_invite_email': False,
+    }, admin)
+    invitation = call(GATEWAY, '/invitation/new', {'user_id': 'qlc-operator'}, admin)
+    onboarding = call(GATEWAY, '/onboarding/get_token?' + urllib.parse.urlencode({
+        'invite_link': invitation['id'],
+    }))
+    # Extract the provided onboarding credential from its UI-token envelope.
+    part = onboarding['token'].split('.')[1]
+    claims = json.loads(base64.urlsafe_b64decode(part + '=' * (-len(part) % 4)))
+    call(GATEWAY, '/onboarding/claim_token', {
+        'invitation_link': invitation['id'], 'user_id': 'qlc-operator',
+        'password': ENV['LITELLM_ADMIN_PASSWORD'],
+    }, {'Authorization': 'Bearer ' + claims['key']})
+    if not admin_login_ok():
+        raise SystemExit('Database admin login verification failed.')
+print('Database admin login verified; environment login is disabled.')
+
 client_file = ROOT / '.runtime/client-key'
 key = client_file.read_text().strip() if client_file.exists() else None
 if key:
@@ -85,9 +135,11 @@ else:
     client_file.chmod(0o600)
 call(GATEWAY, '/v1/models', headers={'Authorization': 'Bearer ' + key})
 access = {
-    'OPENAI_BASE_URL': GATEWAY + '/v1', 'OPENAI_API_KEY': key, 'OPENAI_MODEL': 'qwen3.8-27b',
-    'LITELLM_UI_URL': GATEWAY + '/ui/', 'LITELLM_UI_USERNAME': 'admin',
-    'LITELLM_UI_PASSWORD': ENV['UI_PASSWORD'], 'PORTAINER_URL': PORTAINER,
+    'OPENAI_BASE_URL': ENV.get('PUBLIC_API_BASE_URL', GATEWAY + '/v1'), 'OPENAI_API_KEY': key, 'OPENAI_MODEL': 'qwen3.8-27b',
+    'LITELLM_UI_URL': ENV.get('PUBLIC_UI_URL', GATEWAY + '/ui/'),
+    'LITELLM_UI_USERNAME': ENV['LITELLM_ADMIN_USERNAME'],
+    'LITELLM_UI_PASSWORD': ENV['LITELLM_ADMIN_PASSWORD'],
+    'PORTAINER_URL': ENV.get('PUBLIC_INFRA_URL', PORTAINER),
     'PORTAINER_USERNAME': 'admin', 'PORTAINER_PASSWORD': ENV['PORTAINER_PASSWORD'],
 }
 path = Path.home() / '.config/qwen-local-coder/docker-access.env'
